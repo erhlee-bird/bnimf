@@ -1,6 +1,26 @@
-## Create a DSL for generating EBNF-based parsers.
-## EBNF for the proposed ISO/IEC 14977 standard.
-import macros, tables
+##[
+Create a DSL for generating EBNF-based parsers.
+
+e.g.
+
+# The base language of the DSL must adhere to Nim grammar.
+# The symbols cannot have `-` characters as they are invalid for forming Nim
+# ident nodes.
+
+# The DSL works by
+# 1) Consuming a set of NimNodes.
+# 2) Maintaining a dependency graph of the rules.
+
+rule rule_name: ident | number
+
+# Terminals that appear on the right should be peg strings following the
+# specification present in the Nim stdlib pegs module.
+
+rule ident: "\a\w+"
+
+rule number: "\d+"
+]##
+import macros, pegs, tables
 import ./graph
 
 type
@@ -18,6 +38,7 @@ var
     ## If there are edges remaining that do not have both nodes present, we have
     ## an unmet dependency and an appropriate error can be raised.
 
+  parses: Table[string, seq[string]]
   terminals: seq[string] = @[]
 
 ## Operators of the EBNF Language.
@@ -67,7 +88,8 @@ proc collapse(parent: NimNode, rule: string): NimNode =
     # Display a warning, this most likely signifies that symbols were written
     # with dashes in the names.
     var op = parent[0]
-    result = collapseOp(op)
+    op.ident.echo
+    result = newEmptyNode()
   else:
     discard
 
@@ -87,24 +109,17 @@ macro rule(name: untyped, body: untyped): typed =
   for node in body:
     node.collapse($name).copyChildrenTo(result)
 
-rule postal_address: name_part street_address zip_part
+## Tests
+when isMainModule:
+  dumpTree:
+    rule test: a b | c | d
 
-dumpTree:
-  rule opt_apt_num: apt_num | ""
+  rule rule_expr: rule_name | rule_number
+  rule rule_name: ident
+  rule rule_number: number
+  rule ident: peg"\ident"
 
-# expandMacros:
-#  rule opt_apt_num: apt_num | ""
-
-rule street_address: house_num street_name opt_apt_num
-
-rule opt_apt_num: apt_num | ""
-
-
-
-# dumpTree:
-#  rule name_part: personal_part last_name opt_suffix_part EOL | personal_part name_part
-
-echo "BEGIN"
-for edge in symbols.edges:
-  echo edge[0] & " -> " & edge[1]
-echo "END"
+  echo "BEGIN"
+  for edge in symbols.edges:
+    echo edge[0] & " -> " & edge[1]
+  echo "END"
