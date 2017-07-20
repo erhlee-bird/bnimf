@@ -1,6 +1,21 @@
 ##[
 Create a DSL for generating EBNF-based parsers.
 
+Operators of the EBNF Language.
+
+definition =
+concatenation ,
+termination ;
+alternation |
+optional [ ... ]
+repetition { ... }
+grouping ( ... )
+terminal string " ... "
+terminal string ' ... '
+comment (* ... *)
+special sequence ? ... ?
+exception -
+
 e.g.
 
 # The base language of the DSL must adhere to Nim grammar.
@@ -20,11 +35,38 @@ rule ident: "\a\w+"
 
 rule number: "\d+"
 ]##
-import macros, pegs, tables
+import macros, pegs, strutils, tables
 import ./graph
 
 type
   RuleException = object of Exception
+
+  AstKind = enum
+    ast_rule_list,
+    ast_rule,
+    ast_parse,
+    ast_rule_ref,
+
+  AstNode = object
+    children: seq[AstNode]
+    case kind: AstKind
+    of ast_rule, ast_rule_ref:
+      ident: string
+    else:
+      discard
+
+proc `$`(A: AstNode): string =
+  let kindstr = ($A.kind).replace("ast_", "")
+  case A.kind
+  of ast_rule, ast_rule_ref:
+    result = kindstr & ": " & A.ident
+  else:
+    result = kindstr
+
+proc echo(A: AstNode, depth: int = 0) =
+  echo("  ".repeat(depth) & $A)
+  for child in A.children:
+    echo(child, depth + 1)
 
 var
   symbols: Graph[string] = newGraph[string]()
@@ -38,86 +80,78 @@ var
     ## If there are edges remaining that do not have both nodes present, we have
     ## an unmet dependency and an appropriate error can be raised.
 
-  parses: Table[string, seq[string]]
-  terminals: seq[string] = @[]
+  rules: AstNode = AstNode(kind: ast_rule_list, children: @[])
+    ## A list of the collected rules.
 
-## Operators of the EBNF Language.
-##
-## definition =
-## concatenation ,
-## termination ;
-## alternation |
-## optional [ ... ]
-## repetition { ... }
-## grouping ( ... )
-## terminal string " ... "
-## terminal string ' ... '
-## comment (* ... *)
-## special sequence ? ... ?
-## exception -
+  new_rule: AstNode
+    ## A global variable to allow the macros to operate disjointly.
 
-proc collapseOp(op: NimNode): NimNode =
-  case op.kind
-  of nnkIdent:
-    let opStr = $op.ident
-    return (quote do:
-      `opStr`.echo)
+  new_parse: AstNode
+    ## A global variable to allow the macros to operate disjointly.
+
+proc collapse(parent: NimNode): NimNode =
+  ## Collapse the AST into a list of leaf nodes.
+  result = newStmtList()
+  if parent.len > 0:
+    case parent.kind
+    of nnkInfix:
+      # Infix has the first two idents swapped.
+      result.add(parent[1])
+      result.add(parent[0])
+      parent.del(n = 2)
+    else:
+      discard
+    for child in parent:
+      child.collapse.copyChildrenTo(result)
   else:
-    raise newException(RuleException,
-                       "Invalid operator provided in rule definition.")
-  result = op
-
-proc collapse(parent: NimNode, rule: string): NimNode =
-  ## Take the invalid configuration NimNodes and generate more appropriate nodes
-  ## that will serve to generate the lexer/parser/etc.
-  result = newStmtList(@[])
-  case parent.kind
-  of nnkIdent:
-    let parentNode = $parent.ident
-    # Add the new symbol as a node to the graph.
-    # Add an edge from the rule to the symbol to form a new dependency.
-    result.add(quote do:
-      symbols.addNodeTry(`parentNode`)
-      symbols.addEdge(`rule`, `parentNode`))
-  of nnkCommand:
-    # Lisp-like command application for lists of symbols.
-    # Collapse the command and add the symbols to the lookup table.
-    for node in parent:
-      node.collapse(rule).copyChildrenTo(result)
-  of nnkInfix:
-    # Display a warning, this most likely signifies that symbols were written
-    # with dashes in the names.
-    var op = parent[0]
-    op.ident.echo
-    result = newEmptyNode()
-  else:
-    discard
+    result.add(parent)
 
 macro rule(name: untyped, body: untyped): typed =
   ## Collapse the body statements into a sequence of symbols and terminals.
-  if body.len != 1:
-    raise newException(RuleException,
-                       "Invalid rule syntax: 'rule name: part1 part2 | part3'.")
-  result = newStmtList(@[])
-  let ruleNode = $name
-  # Add the rule as a node to the symbol graph.
-  # Find any nodes that have an outgoing edge to us and delete it.
+  result = newStmtList()
+  let strname = $name
+  # Create a new rule node.
   result.add(quote do:
-    symbols.addNodeTry(`ruleNode`)
-    for node in symbols.nodes:
-      symbols.delEdge(node, `ruleNode`))
-  for node in body:
-    node.collapse($name).copyChildrenTo(result)
+    new_rule = AstNode(kind: ast_rule, ident: `strname`, children: @[]))
+  # Create a new parse node.
+  result.add(quote do:
+    new_parse = AstNode(kind: ast_parse, children: @[]))
+  # With the flattened list of AST leaf nodes, generate code to separate them
+  # into separate parses.
+  for node in body.collapse:
+    case node.kind
+    of nnkIdent:
+      let strid = $node.ident
+      if strid == "|":
+        # Handle alternation.
+        result.add(quote do:
+          new_rule.children.add(new_parse)
+          new_parse = AstNode(kind: ast_parse, children: @[]))
+      else:
+        result.add(quote do:
+          new_parse.children.add(AstNode(kind: ast_rule_ref, ident: `strid`)))
+    else:
+      raise newException(RuleException, "Unexpected node type: " & $node.kind)
+  result.add(quote do:
+    rules.children.add(new_rule))
+
+proc dependency_graph() =
+  discard
+
+proc generate() =
+  ## Call this function after all rules have been define.
+  ##
+  ## 1) A dependency graph will be generated to ensure all requisite rules are
+  ##    defined.
+  dependency_graph()
 
 ## Tests
 when isMainModule:
-  dumpTree:
-    rule test: a b | c | d
-
   rule rule_expr: rule_name | rule_number
-  rule rule_name: ident
-  rule rule_number: number
-  rule ident: peg"\ident"
+
+  rule a: b | c d | e
+
+  rules.echo
 
   echo "BEGIN"
   for edge in symbols.edges:
