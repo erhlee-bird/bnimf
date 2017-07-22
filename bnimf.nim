@@ -166,16 +166,6 @@ proc static_check_pass(node: AstNode) {.raises: [RuleException].} =
   for child in node.children:
     child.static_check_pass
 
-## For every lhs rule, add the rule as a node to the symbols graph.
-    ## For every rhs symbol, add an edge from the rule to the symbol if and only
-    ## if the symbol is not already present as a node.
-    ##
-    ## At the end of parsing, iterate over the edges of the graph and remove any
-    ## where both nodes are present in the graph.
-    ##
-    ## If there are edges remaining that do not have both nodes present, we have
-    ## an unmet dependency and an appropriate error can be raised.
-
 proc dependency_graph_pass(node: AstNode) =
   ## Create a dependency graph to check if there are any unsatisfied rules.
   case node.kind
