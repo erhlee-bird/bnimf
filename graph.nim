@@ -67,14 +67,20 @@ proc `[]`*[T](G: Graph[T], A: T): Node {.raises: [KeyError].} =
   ## Lookup a graph node.
   result = G.map.key_to_node[A]
 
-iterator edges*[T](G: Graph[T], A: T): T {.raises: [KeyError].} =
-  for edge in G.graph.outEdges[G[A]].items:
-    yield G.map.node_to_key[edge]
+iterator edges*[T](G: Graph[T], A: T, out_edges: bool = true): array[0..1, T]
+    {.raises: [KeyError].} =
+  let collection = if out_edges:
+                     G.graph.outEdges[G[A]]
+                   else:
+                     G.graph.inEdges[G[A]]
+  for node in collection.items:
+    yield [A, G.map.node_to_key[node]]
 
-iterator edges*[T](G: Graph[T]): array[0..1, T] {.raises: [KeyError].} =
+iterator edges*[T](G: Graph[T], out_edges: bool = true): array[0..1, T]
+    {.raises: [KeyError].} =
   for key in G.map.key_to_node.keys:
-    for edge in G.edges(key):
-      yield [key, edge]
+    for edge in G.edges(key, out_edges):
+      yield edge
 
 proc add[T](G: var Graph[T], A: T, B: T) {.raises: [KeyError].} =
   ## Add a new edge to the graph.

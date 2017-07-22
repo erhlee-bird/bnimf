@@ -35,7 +35,7 @@ rule ident: "\a\w+"
 
 rule number: "\d+"
 ]##
-import macros, pegs, strutils, tables
+import macros, pegs, sequtils, strutils, tables
 import ./graph
 
 type
@@ -46,12 +46,15 @@ type
     ast_rule,
     ast_parse,
     ast_rule_ref,
+    ast_lit,
 
   AstNode = object
     children: seq[AstNode]
     case kind: AstKind
     of ast_rule, ast_rule_ref:
       ident: string
+    of ast_lit:
+      pattern: string
     else:
       discard
 
@@ -60,6 +63,8 @@ proc `$`(A: AstNode): string =
   case A.kind
   of ast_rule, ast_rule_ref:
     result = kindstr & ": " & A.ident
+  of ast_lit:
+    result = kindstr & ": \"" & A.pattern & "\""
   else:
     result = kindstr
 
@@ -69,19 +74,11 @@ proc echo(A: AstNode, depth: int = 0) =
     echo(child, depth + 1)
 
 var
-  symbols: Graph[string] = newGraph[string]()
-    ## For every lhs rule, add the rule as a node to the symbols graph.
-    ## For every rhs symbol, add an edge from the rule to the symbol if and only
-    ## if the symbol is not already present as a node.
-    ##
-    ## At the end of parsing, iterate over the edges of the graph and remove any
-    ## where both nodes are present in the graph.
-    ##
-    ## If there are edges remaining that do not have both nodes present, we have
-    ## an unmet dependency and an appropriate error can be raised.
-
   rules: AstNode = AstNode(kind: ast_rule_list, children: @[])
     ## A list of the collected rules.
+
+  dep_graph: Graph[string] = newGraph[string]()
+    ## A dependency graph for the rules.
 
   new_rule: AstNode
     ## A global variable to allow the macros to operate disjointly.
@@ -130,30 +127,104 @@ macro rule(name: untyped, body: untyped): typed =
       else:
         result.add(quote do:
           new_parse.children.add(AstNode(kind: ast_rule_ref, ident: `strid`)))
+    of nnkStrLit, nnkRStrLit:
+      let strval = $node.strVal
+      result.add(quote do:
+        new_parse.children.add(AstNode(kind: ast_lit, pattern: `strval`)))
     else:
       raise newException(RuleException, "Unexpected node type: " & $node.kind)
   result.add(quote do:
+    new_rule.children.add(new_parse)
     rules.children.add(new_rule))
 
-proc dependency_graph() =
-  discard
+# Routines to run post rule generation.
 
-proc generate() =
-  ## Call this function after all rules have been define.
+proc static_check_pass(node: AstNode) {.raises: [RuleException].} =
+  ## Verify that the provided AstNode is properly typed.
+  proc all_children_of(node: AstNode, ckind: seq[AstKind]) =
+    # All children of the provided `node` must be of kind `ckind`.
+    if not allIt(node.children, it.kind in ckind):
+      var astrepr = ("Expected all children of " & $node & " to be of type " &
+        $ckind & ".\n")
+      for child in node.children:
+        astrepr &= "  " & $child
+      raise newException(RuleException, astrepr)
+  case node.kind
+  of ast_rule_list:
+    # All children should be of kind ast_rule.
+    node.all_children_of(@[ast_rule])
+  of ast_rule:
+    # All children should be of kind ast_parse.
+    node.all_children_of(@[ast_parse])
+  of ast_parse:
+    # Children can be of kinds ast_rule_ref.
+    node.all_children_of(@[ast_rule_ref, ast_lit])
+  of ast_rule_ref, ast_lit:
+    discard
+  else:
+    raise newException(RuleException, "Unhandled node kind: " & $node.kind)
+  for child in node.children:
+    child.static_check_pass
+
+## For every lhs rule, add the rule as a node to the symbols graph.
+    ## For every rhs symbol, add an edge from the rule to the symbol if and only
+    ## if the symbol is not already present as a node.
+    ##
+    ## At the end of parsing, iterate over the edges of the graph and remove any
+    ## where both nodes are present in the graph.
+    ##
+    ## If there are edges remaining that do not have both nodes present, we have
+    ## an unmet dependency and an appropriate error can be raised.
+
+proc dependency_graph_pass(node: AstNode) =
+  ## Create a dependency graph to check if there are any unsatisfied rules.
+  case node.kind
+  of ast_rule:
+    # Capture the current rule we are creating dependencies for.
+    new_rule = node
+    # Upon finding a rule, add a node representing it to the graph and find any
+    # edges that point to the rule and delete them.
+    dep_graph.addNodeTry(node.ident)
+    for edge in dep_graph.edges(node.ident, false):
+      dep_graph.delEdge2(node.ident, edge[1])
+  of ast_rule_ref:
+    # Add the new symbol that our rule depends on.
+    dep_graph.addNodeTry(node.ident)
+    # Add the edge modeling the dependency from the current rule to the new one.
+    dep_graph.addEdge(new_rule.ident, node.ident)
+  else:
+    discard
+  for child in node.children:
+    child.dependency_graph_pass
+
+proc check_rules*() =
+  ## Call this function after all rules have been defined.
+  ##
+  ## 0) Run a pass over the AST to ensure that the proper node types are found
+  ##    and a proper tree has been formed.
   ##
   ## 1) A dependency graph will be generated to ensure all requisite rules are
   ##    defined.
-  dependency_graph()
+  static_check_pass(rules)
+  dependency_graph_pass(rules)
 
 ## Tests
 when isMainModule:
   rule rule_expr: rule_name | rule_number
 
   rule a: b | c d | e
+  rule b: r"\ident"
+
+  dumpTree:
+    rule c: "fn"
+
+  rule c: "fn"
 
   rules.echo
 
+  check_rules()
+
   echo "BEGIN"
-  for edge in symbols.edges:
+  for edge in dep_graph.edges:
     echo edge[0] & " -> " & edge[1]
   echo "END"
