@@ -36,7 +36,7 @@ rule ident: "\a\w+"
 rule number: "\d+"
 ]##
 import macros, pegs, sequtils, strutils, tables
-import ./graph
+import simple_graph
 
 type
   RuleException = object of Exception
@@ -62,9 +62,9 @@ proc `$`(A: AstNode): string =
   let kindstr = ($A.kind).replace("ast_", "")
   case A.kind
   of ast_rule, ast_rule_ref:
-    result = kindstr & ": " & A.ident
+    result = "(" & kindstr & ") " & A.ident
   of ast_lit:
-    result = kindstr & ": \"" & A.pattern & "\""
+    result = kindstr & " = \"" & A.pattern & "\""
   else:
     result = kindstr
 
@@ -73,11 +73,23 @@ proc echo(A: AstNode, depth: int = 0) =
   for child in A.children:
     echo(child, depth + 1)
 
+template addNodeTry(G, A: untyped): untyped =
+  ## Attempt to add a node regardless of whether or not it exists.
+  try:
+    G.addNode(A)
+  except KeyError:
+    discard
+
+template delEdge2(G, A, B: untyped): untyped =
+  ## Delete edges in both directions for DirectedGraphs.
+  G.delEdge(A, B)
+  G.delEdge(B, A)
+
 var
   rules: AstNode = AstNode(kind: ast_rule_list, children: @[])
     ## A list of the collected rules.
 
-  dep_graph: Graph[string] = newGraph[string]()
+  dep_graph: DirectedGraph[string] = DirectedGraph[string]()
     ## A dependency graph for the rules.
 
   new_rule: AstNode
@@ -86,6 +98,9 @@ var
   new_parse: AstNode
     ## A global variable to allow the macros to operate disjointly.
 
+# Initialize the dependency graph.
+dep_graph.initGraph()
+
 proc collapse(parent: NimNode): NimNode =
   ## Collapse the AST into a list of leaf nodes.
   result = newStmtList()
@@ -93,6 +108,16 @@ proc collapse(parent: NimNode): NimNode =
     case parent.kind
     of nnkInfix:
       # Infix has the first two idents swapped.
+      # e.g.
+      #   Infix(Ident(ident"|"),
+      #         Ident(ident"rule_name"),
+      #         Ident(ident"rule_number"))
+      #
+      #   becomes
+      #
+      #   StmtList(Ident(ident"rule_name"),
+      #            Ident(ident"|"),
+      #            Ident(ident"rule_number"))
       result.add(parent[1])
       result.add(parent[0])
       parent.del(n = 2)
@@ -103,9 +128,11 @@ proc collapse(parent: NimNode): NimNode =
   else:
     result.add(parent)
 
-macro rule(name: untyped, body: untyped): typed =
+macro rule*(name: untyped, body: untyped): typed =
   ## Collapse the body statements into a sequence of symbols and terminals.
   result = newStmtList()
+  # echo body.collapse.treeRepr
+
   let strname = $name
   # Create a new rule node.
   result.add(quote do:
@@ -113,6 +140,7 @@ macro rule(name: untyped, body: untyped): typed =
   # Create a new parse node.
   result.add(quote do:
     new_parse = AstNode(kind: ast_parse, children: @[]))
+
   # With the flattened list of AST leaf nodes, generate code to separate them
   # into separate parses.
   for node in body.collapse:
@@ -132,7 +160,7 @@ macro rule(name: untyped, body: untyped): typed =
       result.add(quote do:
         new_parse.children.add(AstNode(kind: ast_lit, pattern: `strval`)))
     else:
-      raise newException(RuleException, "Unexpected node type: " & $node.kind)
+      error("Unexpected node type: " & $node.kind)
   result.add(quote do:
     new_rule.children.add(new_parse)
     rules.children.add(new_rule))
@@ -198,21 +226,7 @@ proc check_rules*() =
   static_check_pass(rules)
   dependency_graph_pass(rules)
 
-## Tests
-when isMainModule:
-  rule rule_expr: rule_name | rule_number
-
-  rule a: b | c d | e
-  rule b: r"\ident"
-
-  dumpTree:
-    rule c: "fn"
-
-  rule c: "fn"
-
   rules.echo
-
-  check_rules()
 
   echo "BEGIN"
   for edge in dep_graph.edges:
